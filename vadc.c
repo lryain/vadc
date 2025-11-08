@@ -1,14 +1,15 @@
 #include "vadc.h"
 
 #include <inttypes.h>
-
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h> // GetModuleFileNameW
-#include <Shlwapi.h> // PathRemoveFileSpecW, PathAppendW
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <time.h>
+#include <sys/stat.h>
+#include <stdarg.h>
 
 #include "string8.c"
-
-#include <tracy\TracyC.h>
 
 #include "utils.h"
 
@@ -25,6 +26,21 @@
 #ifndef DEBUG_WRITE_STATE_TO_FILE
 #define DEBUG_WRITE_STATE_TO_FILE 0
 #endif
+
+// 全局变量用于日志和音频保存
+static FILE *g_audio_output_file = NULL;
+static FILE *g_log_file = NULL;
+static FILE *g_speech_audio_file = NULL;      // 说话音频文件
+static FILE *g_noise_audio_file = NULL;       // 噪音音频文件
+static FILE *g_speech_playback_pipe = NULL;   // 说话实时播放管道
+static FILE *g_noise_playback_pipe = NULL;    // 噪音实时播放管道
+static b32 g_save_audio = 0;
+static b32 g_save_speech_audio = 0;           // 单独保存说话
+static b32 g_save_noise_audio = 0;            // 单独保存噪音
+static b32 g_play_speech_audio = 0;           // 实时播放说话
+static b32 g_play_noise_audio = 0;            // 实时播放噪音
+static b32 g_verbose_logging = 0;
+static int g_current_speech_event = 0;
 
 
 // TODO(irwin):
@@ -52,6 +68,222 @@ static FILE *getDebugFile()
 #endif
 
 
+
+// 日志输出函数
+static void vad_log(const char *format, ...)
+{
+   va_list args;
+   va_start(args, format);
+   
+   // 输出到 stderr
+   vfprintf(stderr, format, args);
+   fprintf(stderr, "\n");
+   fflush(stderr);
+   
+   // 如果启用了日志文件，也输出到文件
+   if (g_log_file)
+   {
+      vfprintf(g_log_file, format, args);
+      fprintf(g_log_file, "\n");
+      fflush(g_log_file);
+   }
+   
+   va_end(args);
+}
+
+// 初始化音频和日志输出文件
+static void init_audio_logging(const char *audio_output_file, const char *log_output_file)
+{
+   if (audio_output_file)
+   {
+      g_audio_output_file = fopen(audio_output_file, "wb");
+      if (g_audio_output_file)
+      {
+         g_save_audio = 1;
+         vad_log("✓ 音频将保存到: %s", audio_output_file);
+      }
+      else
+      {
+         vad_log("✗ 无法打开音频文件: %s", audio_output_file);
+      }
+   }
+   
+   if (log_output_file)
+   {
+      g_log_file = fopen(log_output_file, "w");
+      if (g_log_file)
+      {
+         vad_log("✓ 日志将保存到: %s", log_output_file);
+      }
+      else
+      {
+         vad_log("✗ 无法打开日志文件: %s", log_output_file);
+      }
+   }
+}
+
+// 初始化分离保存说话和噪音的文件
+static void init_separated_audio_logging(const char *speech_audio_file, const char *noise_audio_file)
+{
+   if (speech_audio_file)
+   {
+      g_speech_audio_file = fopen(speech_audio_file, "wb");
+      if (g_speech_audio_file)
+      {
+         g_save_speech_audio = 1;
+         vad_log("✓ 说话音频将保存到: %s", speech_audio_file);
+      }
+      else
+      {
+         vad_log("✗ 无法打开说话音频文件: %s", speech_audio_file);
+      }
+   }
+   
+   if (noise_audio_file)
+   {
+      g_noise_audio_file = fopen(noise_audio_file, "wb");
+      if (g_noise_audio_file)
+      {
+         g_save_noise_audio = 1;
+         vad_log("✓ 噪音音频将保存到: %s", noise_audio_file);
+      }
+      else
+      {
+         vad_log("✗ 无法打开噪音音频文件: %s", noise_audio_file);
+      }
+   }
+}
+
+// 清理日志和音频文件
+static void cleanup_audio_logging(void)
+{
+   if (g_audio_output_file)
+   {
+      fclose(g_audio_output_file);
+      g_audio_output_file = NULL;
+   }
+   if (g_log_file)
+   {
+      fclose(g_log_file);
+      g_log_file = NULL;
+   }
+   if (g_speech_audio_file)
+   {
+      fclose(g_speech_audio_file);
+      g_speech_audio_file = NULL;
+   }
+   if (g_noise_audio_file)
+   {
+      fclose(g_noise_audio_file);
+      g_noise_audio_file = NULL;
+   }
+   if (g_speech_playback_pipe)
+   {
+      pclose(g_speech_playback_pipe);
+      g_speech_playback_pipe = NULL;
+   }
+   if (g_noise_playback_pipe)
+   {
+      pclose(g_noise_playback_pipe);
+      g_noise_playback_pipe = NULL;
+   }
+}
+
+// 初始化实时播放管道
+static void init_playback_pipes(void)
+{
+   // 创建 aplay 进程用于实时播放说话音频
+   if (g_play_speech_audio)
+   {
+      g_speech_playback_pipe = popen("aplay -f S16_LE -r 16000 -c 1 2>/dev/null", "w");
+      if (g_speech_playback_pipe)
+      {
+         fprintf(stderr, "🔊 说话音频将实时播放\n");
+         fflush(stderr);
+      }
+      else
+      {
+         fprintf(stderr, "⚠️  无法启动说话音频播放 (aplay 不可用?)\n");
+         g_play_speech_audio = 0;
+         fflush(stderr);
+      }
+   }
+   
+   // 创建 aplay 进程用于实时播放噪音音频
+   if (g_play_noise_audio)
+   {
+      g_noise_playback_pipe = popen("aplay -f S16_LE -r 16000 -c 1 2>/dev/null", "w");
+      if (g_noise_playback_pipe)
+      {
+         fprintf(stderr, "🔊 噪音音频将实时播放\n");
+         fflush(stderr);
+      }
+      else
+      {
+         fprintf(stderr, "⚠️  无法启动噪音音频播放 (aplay 不可用?)\n");
+         g_play_noise_audio = 0;
+         fflush(stderr);
+      }
+   }
+}
+
+// 播放或保存分离的音频（说话/噪音）
+static void playback_or_save_separated_audio(const short *samples, size_t count, int is_speech)
+{
+   if (is_speech)
+   {
+      // 说话音频
+      if (g_save_speech_audio && g_speech_audio_file)
+      {
+         fwrite(samples, sizeof(short), count, g_speech_audio_file);
+         fflush(g_speech_audio_file);
+      }
+      if (g_play_speech_audio && g_speech_playback_pipe)
+      {
+         fwrite(samples, sizeof(short), count, g_speech_playback_pipe);
+         fflush(g_speech_playback_pipe);
+      }
+   }
+   else
+   {
+      // 噪音音频
+      if (g_save_noise_audio && g_noise_audio_file)
+      {
+         fwrite(samples, sizeof(short), count, g_noise_audio_file);
+         fflush(g_noise_audio_file);
+      }
+      if (g_play_noise_audio && g_noise_playback_pipe)
+      {
+         fwrite(samples, sizeof(short), count, g_noise_playback_pipe);
+         fflush(g_noise_playback_pipe);
+      }
+   }
+}
+
+// 写入音频数据
+static void write_audio_samples(const short *samples, size_t count)
+{
+   if (g_save_audio && g_audio_output_file)
+   {
+      fwrite(samples, sizeof(short), count, g_audio_output_file);
+      fflush(g_audio_output_file);
+   }
+}
+
+// 根据是否是说话来写入分离的音频
+static void write_separated_audio_samples(const short *samples, size_t count, b32 is_speech)
+{
+   if (is_speech && g_save_speech_audio && g_speech_audio_file)
+   {
+      fwrite(samples, sizeof(short), count, g_speech_audio_file);
+      fflush(g_speech_audio_file);
+   }
+   else if (!is_speech && g_save_noise_audio && g_noise_audio_file)
+   {
+      fwrite(samples, sizeof(short), count, g_noise_audio_file);
+      fflush(g_noise_audio_file);
+   }
+}
 
 void process_chunks( MemoryArena *arena, VADC_Context context, Silero_Config config,
                     const size_t buffered_samples_count,
@@ -426,9 +658,6 @@ struct Buffered_Stream
 
    BS_Error error_code;
 
-   // NOTE(irwin): win32
-   HANDLE read_handle_internal;
-
    // NOTE(irwin): crt
    FILE *file_handle_internal;
 
@@ -489,45 +718,6 @@ BS_Error refill_FILE( Buffered_Stream *s )
    return s->error_code;
 }
 
-BS_Error refill_HANDLE( Buffered_Stream *s )
-{
-   if ( s->cursor == s->end )
-   {
-      DWORD byte_count_read = 0;
-      DWORD byte_count_read_total = 0;
-      BOOL read_file_result = 0;
-      do
-      {
-         // NOTE(irwin): keep calling ReadFile until we've filled our internal buffer or until ReadFile returns 0
-         u8 *destination = s->buffer_internal + byte_count_read_total;
-         DWORD max_byte_count_to_read = (DWORD)s->buffer_internal_size - byte_count_read_total;
-
-         read_file_result = ReadFile( s->read_handle_internal, destination, max_byte_count_to_read, &byte_count_read, NULL );
-         byte_count_read_total += byte_count_read;
-      } while (read_file_result && byte_count_read > 0 && byte_count_read_total < (DWORD)s->buffer_internal_size);
-
-      if ( byte_count_read_total > 0 )
-      {
-         s->start = s->buffer_internal;
-         s->cursor = s->buffer_internal;
-         s->end = s->start + byte_count_read_total;
-      }
-      else
-      {
-         if ( !read_file_result )
-         {
-            return fail_buffered_stream( s, BS_Error_EndOfFile );
-         }
-         else // read_file_result && bytes_read == 0
-         {
-            return fail_buffered_stream( s, BS_Error_Error );
-         }
-      }
-   }
-
-   return s->error_code;
-}
-
 static void init_buffered_stream_ffmpeg(MemoryArena *arena, Buffered_Stream *s, String8 fname_inp, size_t buffer_size,
                   int audio_source,
                   float start_seconds)
@@ -536,74 +726,35 @@ static void init_buffered_stream_ffmpeg(MemoryArena *arena, Buffered_Stream *s, 
 
    const char *ffmpeg_to_s16le = "ffmpeg -hide_banner -loglevel error -nostats -ss %f -i \"%.*s\" -map 0:a:%d -vn -sn -dn -ac 1 -ar 16k -f s16le -";
    String8 ffmpeg_command = String8_pushf(arena, ffmpeg_to_s16le, start_seconds, fname_inp.size, fname_inp.begin, audio_source);
-   wchar_t *ffmpeg_command_wide = NULL;
-   String8_ToWidechar(arena, &ffmpeg_command_wide, ffmpeg_command);
 
+   // Convert String8 to null-terminated C string
+   char *cmd_str = pushArray(arena, ffmpeg_command.size + 1, char);
+   memcpy(cmd_str, ffmpeg_command.begin, ffmpeg_command.size);
+   cmd_str[ffmpeg_command.size] = '\0';
+
+   // Use popen to run ffmpeg and get its output
+   FILE *ffmpeg_pipe = popen(cmd_str, "rb");
+   
+   if (ffmpeg_pipe == NULL)
    {
-      // Create the pipe
-      SECURITY_ATTRIBUTES saAttr = {sizeof( SECURITY_ATTRIBUTES )};
-      saAttr.bInheritHandle = FALSE;
+      fprintf(stderr, "Error launching ffmpeg\n");
+      fail_buffered_stream(s, BS_Error_Error);
+      return;
+   }
 
-      HANDLE ffmpeg_stdout_read, ffmpeg_stdout_write;
-
-      if ( !CreatePipe( &ffmpeg_stdout_read, &ffmpeg_stdout_write, &saAttr, 0 ) )
-      {
-         fprintf( stderr, "Error creating ffmpeg pipe\n" );
-         return;
-      }
-
-      // NOTE(irwin): ffmpeg does inherit the write handle to its output
-      SetHandleInformation( ffmpeg_stdout_write, HANDLE_FLAG_INHERIT, 1 );
-
-      // Launch ffmpeg and redirect its output to the pipe
-      STARTUPINFOW startup_info_ffmpeg = {sizeof( STARTUPINFO )};
-      // NOTE(irwin): hStdInput is 0, we don't want ffmpeg to inherit our stdin
-      startup_info_ffmpeg.hStdOutput = ffmpeg_stdout_write;
-      startup_info_ffmpeg.hStdError = GetStdHandle( STD_ERROR_HANDLE );
-      startup_info_ffmpeg.dwFlags |= STARTF_USESTDHANDLES;
-
-      PROCESS_INFORMATION ffmpeg_process_info = {0};
-
-      if ( !CreateProcessW( NULL, ffmpeg_command_wide, NULL, NULL, TRUE, 0, NULL, NULL, &startup_info_ffmpeg, &ffmpeg_process_info ) )
-      {
-         fprintf( stderr, "Error launching ffmpeg\n" );
-         return;
-      }
-
-      // Close the write end of the pipe, as we're not writing to it
-      CloseHandle( ffmpeg_stdout_write );
-
-      // NOTE(irwin): restore non-inheritable status
-      SetHandleInformation( ffmpeg_stdout_write, HANDLE_FLAG_INHERIT, 0 );
-
-      // we can close the handles early if we're not going to use them
-      CloseHandle( ffmpeg_process_info.hProcess );
-      CloseHandle( ffmpeg_process_info.hThread );
-
-
-      if ( ffmpeg_stdout_read != INVALID_HANDLE_VALUE )
-      {
-         // s->buffer_internal = malloc( buffer_size );
-         s->buffer_internal = pushSizeZeroed( arena, buffer_size, TEMP_DEFAULT_ALIGNMENT );
-         if ( s->buffer_internal )
-         {
-            // memset( s->buffer_internal, 0, buffer_size );
-            s->read_handle_internal = ffmpeg_stdout_read;
-            s->refill = refill_HANDLE;
-            s->buffer_internal_size = buffer_size;
-            s->error_code = BS_Error_NoError;
-            s->refill( s );
-         }
-         else
-         {
-            fail_buffered_stream( s, BS_Error_Memory );
-         }
-      }
-      else
-      {
-         // TODO(irwin):
-         fail_buffered_stream( s, BS_Error_Error );
-      }
+   s->buffer_internal = pushSizeZeroed(arena, buffer_size, TEMP_DEFAULT_ALIGNMENT);
+   if (s->buffer_internal)
+   {
+      s->file_handle_internal = ffmpeg_pipe;
+      s->refill = refill_FILE;
+      s->buffer_internal_size = buffer_size;
+      s->error_code = BS_Error_NoError;
+      s->refill(s);
+   }
+   else
+   {
+      pclose(ffmpeg_pipe);
+      fail_buffered_stream(s, BS_Error_Memory);
    }
 }
 
@@ -613,8 +764,8 @@ static void init_buffered_stream_stdin(MemoryArena *arena, Buffered_Stream *s, s
    s->buffer_internal = pushSizeZeroed( arena, buffer_size, TEMP_DEFAULT_ALIGNMENT );
    if ( s->buffer_internal )
    {
-      s->read_handle_internal = GetStdHandle(STD_INPUT_HANDLE);
-      s->refill = refill_HANDLE;
+      s->file_handle_internal = stdin;
+      s->refill = refill_FILE;
       s->buffer_internal_size = buffer_size;
       s->error_code = BS_Error_NoError;
       s->refill( s );
@@ -681,11 +832,48 @@ int run_inference(String8 model_path_arg,
                   b32 stats_output_enabled,
                   s32 preferred_batch_size,
                   int audio_source,
-                  float start_seconds )
+                  float start_seconds,
+                  const char *audio_output_file,
+                  const char *log_output_file,
+                  const char *speech_audio_file,
+                  const char *noise_audio_file,
+                  b32 verbose_logging )
 {
    Silero_Config config = {0};
    config.batch_size_restriction = 1;
    config.batch_size = 1;
+
+   // 初始化日志和音频输出
+   init_audio_logging(audio_output_file, log_output_file);
+   init_separated_audio_logging(speech_audio_file, noise_audio_file);
+
+   g_verbose_logging = verbose_logging;
+
+   // 始终输出初始化信息到 stderr
+   fprintf(stderr, "\n🚀 初始化推理引擎...\n");
+   fprintf(stderr, "  模型路径: %.*s\n", (int)model_path_arg.size, model_path_arg.begin);
+   fflush(stderr);
+
+   if (g_verbose_logging)
+   {
+      vad_log("════════════════════════════════════════════");
+      vad_log("VADC - 语音活动检测系统");
+      vad_log("════════════════════════════════════════════");
+      vad_log("参数配置:");
+      vad_log("  说话概率阈值: %.2f", threshold);
+      vad_log("  最小沉默时长: %.0fms", min_silence_duration_ms);
+      vad_log("  最小说话时长: %.0fms", min_speech_duration_ms);
+      vad_log("  语音边界填充: %.0fms", speech_pad_ms);
+      if (audio_output_file)
+      {
+         vad_log("  音频输出文件: %s", audio_output_file);
+      }
+      if (log_output_file)
+      {
+         vad_log("  日志输出文件: %s", log_output_file);
+      }
+      vad_log("════════════════════════════════════════════");
+   }
 
    void *backend = backend_init( arena, model_path_arg, &config );
 
@@ -796,7 +984,8 @@ int run_inference(String8 model_path_arg,
    // NOTE(irwin): at 16000 sampling rate, one chunk is 96 ms or 1536 samples
    // NOTE(irwin): chunks count being 96, the same as one chunk's length in milliseconds,
    // is purely coincidental
-   const int chunks_count = 96;
+   // NOTE: 减小到 4 以获得更好的实时响应（每 384ms 处理一次而不是每 9.2 秒）
+   const int chunks_count = 2;
    // NOTE(irwin): buffered_samples_count is the normalization window size
    const size_t buffered_samples_count = buffers.window_size_samples * chunks_count;
 
@@ -833,19 +1022,23 @@ int run_inference(String8 model_path_arg,
    VADC_Stats stats = {0};
    stats.output_enabled = stats_output_enabled;
    {
-      LARGE_INTEGER frequency = {0};
-      LARGE_INTEGER first_timestamp = {0};
+      struct timespec first_timestamp;
+      clock_gettime(CLOCK_MONOTONIC, &first_timestamp);
 
-      QueryPerformanceFrequency(&frequency);
-      QueryPerformanceCounter(&first_timestamp);
-
-      stats.first_call_timestamp = first_timestamp.QuadPart;
-      stats.timer_frequency = frequency.QuadPart;
+      // Store nanosecond timestamp
+      stats.first_call_timestamp = first_timestamp.tv_sec * 1000000000LL + first_timestamp.tv_nsec;
+      // Timer frequency in nanoseconds = 1 second = 1e9 ns
+      stats.timer_frequency = 1000000000LL;
    }
 
    const float HARDCODED_SECONDS_PER_CHUNK = (float)config.input_count / HARDCODED_SAMPLE_RATE;
 
    s64 total_samples_read = 0;
+
+   // 日志：初始化完成，开始处理音频
+   fprintf(stderr, "✓ 初始化完成\n");
+   fprintf(stderr, "🎵 开始处理音频数据...\n");
+   fflush(stderr);
 
    // NOTE(irwin): values_read is only accessed inside the for loop
    size_t values_read = 0;
@@ -871,6 +1064,13 @@ int run_inference(String8 model_path_arg,
       if ( read_error_code == BS_Error_NoError )
       {
          memmove( samples_buffer_s16, read_stream.start, read_stream.end - read_stream.start );
+         
+         // 保存音频数据
+         if (g_save_audio)
+         {
+            write_audio_samples(samples_buffer_s16, values_read);
+         }
+         
          float max_value = 0.0f;
          for (size_t i = 0; i < values_read; ++i)
          {
@@ -967,6 +1167,20 @@ int run_inference(String8 model_path_arg,
          for (int i = 0; i < probabilities_count; ++i)
          {
             float probability = probabilities_buffer[i];
+            
+            // 根据概率分离保存音频
+            size_t chunk_start = i * config.input_count;
+            size_t chunk_size = config.input_count;
+            if (chunk_start + chunk_size > values_read)
+            {
+               chunk_size = values_read - chunk_start;
+            }
+            
+            if (chunk_size > 0 && (g_save_speech_audio || g_save_noise_audio))
+            {
+               b32 is_speech = (probability > threshold);
+               write_separated_audio_samples(&samples_buffer_s16[chunk_start], chunk_size, is_speech);
+            }
 
             FeedProbabilityResult feed_result = feed_probability(&state,
                           min_silence_duration_chunks,
@@ -981,6 +1195,36 @@ int run_inference(String8 model_path_arg,
          {
             buffered = combine_or_emit_speech_segment(buffered, feed_result,
                                                       speech_pad_ms, output_format, &stats, HARDCODED_SECONDS_PER_CHUNK);
+            
+            // 日志：检测到语音事件（总是输出到 stderr）
+            double start_time = feed_result.speech_start * HARDCODED_SECONDS_PER_CHUNK;
+            double end_time = feed_result.speech_end * HARDCODED_SECONDS_PER_CHUNK;
+            fprintf(stderr, "🎤 检测到语音事件 | 时间: %.2f-%.2f秒 (时长: %.2f秒) | 概率: %.1f%%\n",
+                    start_time, end_time, end_time - start_time, probability * 100.0f);
+            fflush(stderr);
+            
+            if (g_verbose_logging)
+            {
+               double start_time = feed_result.speech_start * HARDCODED_SECONDS_PER_CHUNK;
+               double end_time = feed_result.speech_end * HARDCODED_SECONDS_PER_CHUNK;
+               vad_log("🎤 事件 #%d | 说话: %.2f-%.2f秒 (时长: %.2f秒) | 概率: %.2f%%",
+                       ++g_current_speech_event,
+                       start_time, end_time,
+                       end_time - start_time,
+                       probability * 100.0f);
+            }
+         }
+         
+         if (g_verbose_logging && (global_chunk_index % 10 == 0))
+         {
+            if (probability > threshold)
+            {
+               vad_log("  [▶] 正在说话: %.2f%%", probability * 100.0f);
+            }
+            else if (state.triggered)
+            {
+               vad_log("  [─] 继续说话: %.2f%%", probability * 100.0f);
+            }
          }
 
             // printf("%f\n", probability);
@@ -989,11 +1233,27 @@ int run_inference(String8 model_path_arg,
       }
       else
       {
+         // 性能监测：每处理完一批数据输出时间戳
+         struct timespec current_time;
+         clock_gettime(CLOCK_MONOTONIC, &current_time);
+         double elapsed_ms = ((current_time.tv_sec * 1000000000LL + current_time.tv_nsec) - stats.first_call_timestamp) / 1000000.0;
+         
          for (int i = 0; i < probabilities_count; ++i)
          {
             float probability = probabilities_buffer[i];
             printf("%f\n", probability);
+            fflush(stdout);  // 立即刷新输出
             ++global_chunk_index;
+         }
+         
+         // 记录处理速度（仅在详细日志模式下）
+         if (g_verbose_logging && probabilities_count > 0)
+         {
+            fprintf(stderr, "📊 [%.0fms] 已处理 %d 个概率 | 总时长: %.2fs\n",
+                    elapsed_ms,
+                    probabilities_count,
+                    stats.total_duration);
+            fflush(stderr);
          }
       }
 
@@ -1027,6 +1287,21 @@ int run_inference(String8 model_path_arg,
    }
 
    print_speech_stats(stats);
+   
+   if (g_verbose_logging)
+   {
+      vad_log("════════════════════════════════════════════");
+      vad_log("检测完成");
+      vad_log("  总处理时长: %.2f秒", stats.total_duration);
+      vad_log("  检测到语音事件: %d", g_current_speech_event);
+      if (g_save_audio)
+      {
+         vad_log("  ✓ 音频已保存");
+      }
+      vad_log("════════════════════════════════════════════");
+   }
+
+   cleanup_audio_logging();
 
    // g_ort->ReleaseValue(output_tensor);
    // g_ort->ReleaseValue(input_tensor);
@@ -1039,9 +1314,9 @@ static inline void print_speech_stats(VADC_Stats stats)
 #if 0
    VAR_UNUSED(stats);
 #else
-   LARGE_INTEGER current;
-   QueryPerformanceCounter(&current);
-   s64 current_timestamp = current.QuadPart;
+   struct timespec current;
+   clock_gettime(CLOCK_MONOTONIC, &current);
+   s64 current_timestamp = current.tv_sec * 1000000000LL + current.tv_nsec;
 
    double total_speech = stats.total_speech;
    double total_duration = stats.total_duration;
@@ -1063,20 +1338,18 @@ static inline void print_speech_stats(VADC_Stats stats)
    int seconds = (int)(total_duration - hours * 3600.0 - minutes * 60.0);
    int milliseconds = (int)((total_duration - hours * 3600.0 - minutes * 60.0 - seconds) * 1000.0);
 
-
    if (stats.output_enabled)
    {
-      fprintf(stderr, "time=%02d:%02d:%02d.%04d", hours, minutes, seconds, milliseconds);
-      fprintf(stderr, " %7.2f speech (%5.1f%%), %5.1f / %5.1f (%5.1fx)\r",
+      vad_log("time=%02d:%02d:%02d.%04d | speech=%.2fs (%.1f%%) | total=%.1fs | speed=%.1fx",
+              hours, minutes, seconds, milliseconds,
               total_speech,
               total_speech_percent,
               total_duration,
-              (double)ticks / stats.timer_frequency,
               ratio_seconds);
    }
 
    // last_call = current;
-   // stats.last_call_timestamp = current.QuadPart;
+   // stats.last_call_timestamp = current.tv_sec * 1000000000LL + current.tv_nsec;
 #endif
 }
 
@@ -1103,6 +1376,11 @@ enum ArgOptionIndex
    ArgOptionIndex_Stats,
    ArgOptionIndex_OutputFormatCentiSeconds,
    ArgOptionIndex_Model,
+   ArgOptionIndex_SaveAudio,
+   ArgOptionIndex_SaveLog,
+   ArgOptionIndex_SaveSpeechAudio,
+   ArgOptionIndex_SaveNoiseAudio,
+   ArgOptionIndex_Verbose,
 
    ArgOptionIndex_COUNT
 };
@@ -1121,10 +1399,15 @@ ArgOption options[] = {
    {String8FromLiteral("--stats"),                    0.0f  },
    {String8FromLiteral("--output_centi_seconds"),     0.0f  },
    {String8FromLiteral("--model"),                    0.0f  },
+   {String8FromLiteral("--save_audio"),               0.0f  },
+   {String8FromLiteral("--save_log"),                 0.0f  },
+   {String8FromLiteral("--save_speech_audio"),        0.0f  },
+   {String8FromLiteral("--save_noise_audio"),         0.0f  },
+   {String8FromLiteral("--verbose"),                  0.0f  },
 };
 
 
-int main()
+int main(int argc, char **argv)
 {
 
 #if 1
@@ -1145,6 +1428,8 @@ int main()
    MemoryArena *arena = DEBUG_getDebugArena();
 #endif
 
+   /* Initialize command line argument processing */
+   set_command_line_args(argc, argv);
 
    float min_silence_duration_ms;
    float min_speech_duration_ms;
@@ -1158,6 +1443,10 @@ int main()
    String8 model_path_arg = {0};
    //const char *input_filename = "RED.s16le";
    String8 input_filename = {0};
+   const char *audio_output_file = NULL;
+   const char *log_output_file = NULL;
+   const char *speech_audio_file = NULL;
+   const char *noise_audio_file = NULL;
 
    b32 raw_probabilities = 0;
 
@@ -1178,27 +1467,51 @@ int main()
          {
             found_named_option = 1;
 
-            if (arg_option_index == ArgOptionIndex_RawProbabilities)
+            if (arg_option_index == ArgOptionIndex_RawProbabilities ||
+                arg_option_index == ArgOptionIndex_Stats ||
+                arg_option_index == ArgOptionIndex_OutputFormatCentiSeconds ||
+                arg_option_index == ArgOptionIndex_Verbose)
             {
                // TODO(irwin): bool options
                option->value = 1.0f;
             }
-            else if (arg_option_index == ArgOptionIndex_Stats)
-            {
-               // TODO(irwin): bool options
-               option->value = 1.0f;
-            }
-            else if (arg_option_index == ArgOptionIndex_OutputFormatCentiSeconds)
-            {
-               // TODO(irwin): bool options
-               option->value = 1.0f;
-            }
-            else if ( arg_option_index == ArgOptionIndex_Model )
+            else if ( arg_option_index == ArgOptionIndex_Model ||
+                     arg_option_index == ArgOptionIndex_SaveAudio ||
+                     arg_option_index == ArgOptionIndex_SaveLog ||
+                     arg_option_index == ArgOptionIndex_SaveSpeechAudio ||
+                     arg_option_index == ArgOptionIndex_SaveNoiseAudio )
             {
                int arg_value_index = arg_index + 1;
                if ( arg_value_index < arg_count_u8 )
                {
-                  model_path_arg = arg_array_u8[arg_value_index];
+                  String8 arg_value_string = arg_array_u8[arg_value_index];
+                  
+                  if (arg_option_index == ArgOptionIndex_Model)
+                  {
+                     model_path_arg = arg_value_string;
+                  }
+                  else if (arg_option_index == ArgOptionIndex_SaveAudio)
+                  {
+                     const char *cstr = String8ToCString(arena, arg_value_string).begin;
+                     audio_output_file = strdup(cstr);
+                  }
+                  else if (arg_option_index == ArgOptionIndex_SaveLog)
+                  {
+                     const char *cstr = String8ToCString(arena, arg_value_string).begin;
+                     log_output_file = strdup(cstr);
+                  }
+                  else if (arg_option_index == ArgOptionIndex_SaveSpeechAudio)
+                  {
+                     const char *cstr = String8ToCString(arena, arg_value_string).begin;
+                     // 这个值会在 run_inference 中使用
+                     option->value = 1.0f;  // 标记为已设置
+                  }
+                  else if (arg_option_index == ArgOptionIndex_SaveNoiseAudio)
+                  {
+                     const char *cstr = String8ToCString(arena, arg_value_string).begin;
+                     // 这个值会在 run_inference 中使用
+                     option->value = 1.0f;  // 标记为已设置
+                  }
 
                   option->value = 1.0f;
                }
@@ -1224,8 +1537,18 @@ int main()
 
       if ( !found_named_option )
       {
-         // TODO(irwin): trim quotes?
-         input_filename = arg_array_u8[arg_index];
+         // 检查是否是 --stdin 标志
+         String8 stdin_flag = String8FromLiteral("--stdin");
+         if (String8_Equal(arg_string, stdin_flag))
+         {
+            // --stdin 表示从 stdin 读取，不设置 input_filename
+            // input_filename 保持空，这样会调用 init_buffered_stream_stdin
+         }
+         else
+         {
+            // TODO(irwin): trim quotes?
+            input_filename = arg_string;
+         }
       }
    }
 
@@ -1240,9 +1563,32 @@ int main()
       output_format = Segment_Output_Format_CentiSeconds;
    }
    b32 stats_output_enabled = (options[ArgOptionIndex_Stats].value != 0.0f);
+   b32 verbose_logging = (options[ArgOptionIndex_Verbose].value != 0.0f);
 
    neg_threshold           = threshold - neg_threshold_relative;
 
+   // 打印参数摘要到 stderr
+   fprintf(stderr, "\n════════════════════════════════════════════\n");
+   fprintf(stderr, "📋 程序参数配置:\n");
+   fprintf(stderr, "  输入源: %s\n", input_filename.size ? "文件" : "stdin");
+   fprintf(stderr, "  说话概率阈值: %.2f\n", threshold);
+   fprintf(stderr, "  最小沉默时长: %.0f ms\n", min_silence_duration_ms);
+   fprintf(stderr, "  最小说话时长: %.0f ms\n", min_speech_duration_ms);
+   fprintf(stderr, "  原始概率输出: %s\n", raw_probabilities ? "是" : "否");
+   fprintf(stderr, "  统计信息输出: %s\n", stats_output_enabled ? "✓ 启用" : "否");
+   fprintf(stderr, "  详细日志: %s\n", verbose_logging ? "是" : "否");
+   fprintf(stderr, "════════════════════════════════════════════\n\n");
+   fflush(stderr);
+
+   if (!input_filename.size)
+   {
+      fprintf(stderr, "⏳ 等待 stdin 的音频数据 (16kHz, 16-bit, mono PCM)...\n");
+      fprintf(stderr, "   按 Ctrl+C 停止\n");
+      fprintf(stderr, "   提示：可以通过以下方式提供音频:\n");
+      fprintf(stderr, "   - arecord -f S16_LE -c 1 -r 16000 -q - | ./vadc --stats\n");
+      fprintf(stderr, "   - ffmpeg -i file.wav -f s16le -ac 1 -ar 16000 - | ./vadc --stats\n\n");
+      fflush(stderr);
+   }
 
 //    if ( model_path_arg )
 //    {
@@ -1267,7 +1613,12 @@ int main()
                     stats_output_enabled,
                     (int)options[ArgOptionIndex_Batch].value,
                     (int)options[ArgOptionIndex_AudioSource].value,
-                    options[ArgOptionIndex_StartSeconds].value);
+                    options[ArgOptionIndex_StartSeconds].value,
+                    audio_output_file,
+                    log_output_file,
+                    speech_audio_file,
+                    noise_audio_file,
+                    verbose_logging);
 
    }
 

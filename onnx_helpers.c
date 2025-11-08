@@ -1,5 +1,8 @@
 #include "onnx_helpers.h"
+
+#ifdef _MSC_VER
 #pragma comment(lib, "lib/onnxruntime.lib")
+#endif
 
 static const OrtApi *g_ort = NULL;
 
@@ -101,18 +104,61 @@ static void *ort_init( MemoryArena *arena, String8 model_path_arg, Silero_Config
    ORT_ABORT_ON_ERROR( g_ort->SetInterOpNumThreads( session_options, 1 ) );
 
 #define MODEL_PATH_BUFFER_SIZE 1024
-   wchar_t *model_path_arg_w = 0;
-   String8_ToWidechar( arena, &model_path_arg_w, model_path_arg );
-
-   const size_t model_path_buffer_size = MODEL_PATH_BUFFER_SIZE;
-   wchar_t model_path[MODEL_PATH_BUFFER_SIZE];
-   GetModuleFileNameW( NULL, model_path, (DWORD)model_path_buffer_size );
-   PathRemoveFileSpecW( model_path );
-   PathAppendW( model_path, model_path_arg_w ? model_path_arg_w : model_filename );
+   // 优先级: 用户指定 -> 当前目录 v4 -> 父目录 v4 -> 当前目录 v3 -> 父目录 v3 -> v5
+   const char *model_search_paths[] = {
+      "silero_vad_v4.onnx",
+      "../silero_vad_v4.onnx",
+      "silero_vad_v3.onnx",
+      "../silero_vad_v3.onnx",
+      "silero_vad_v5_16k_minibatched-sim.onnx",
+      "../silero_vad_v5_16k_minibatched-sim.onnx"
+   };
+   
+   char model_path_buf[MODEL_PATH_BUFFER_SIZE];
+   const char *model_path_c = NULL;
+   
+   // 如果用户指定了模型路径
+   if (model_path_arg.begin && model_path_arg.size > 0)
+   {
+      model_path_c = (const char *)model_path_arg.begin;
+      strncpy(model_path_buf, model_path_c, sizeof(model_path_buf) - 1);
+   }
+   else
+   {
+      // 尝试每个模型文件路径，直到找到存在的
+      FILE *test_file = NULL;
+      for (int i = 0; i < 6; ++i)
+      {
+         test_file = fopen(model_search_paths[i], "rb");
+         if (test_file)
+         {
+            fclose(test_file);
+            strncpy(model_path_buf, model_search_paths[i], sizeof(model_path_buf) - 1);
+            model_path_c = model_search_paths[i];
+            fprintf(stderr, "Found model: %s\n", model_search_paths[i]);
+            break;
+         }
+      }
+      
+      if (!model_path_c)
+      {
+         fprintf(stderr, "Error: No ONNX model file found.\n");
+         fprintf(stderr, "Searched for:\n");
+         for (int i = 0; i < 6; ++i)
+         {
+            fprintf(stderr, "  %s\n", model_search_paths[i]);
+         }
+         return 0;
+      }
+   }
+   
+   model_path_buf[sizeof(model_path_buf) - 1] = '\0';
+   
+   fprintf(stderr, "Loading ONNX model: %s\n", model_path_buf);
 
    ONNX_Specific *onnx = pushStruct(arena, ONNX_Specific);
 
-   ORT_ABORT_ON_ERROR( g_ort->CreateSession( env, model_path, session_options, &onnx->session ) );
+   ORT_ABORT_ON_ERROR( g_ort->CreateSession( env, (const wchar_t *)model_path_buf, session_options, &onnx->session ) );
 
    if (onnx->session)
    {

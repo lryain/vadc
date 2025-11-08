@@ -159,7 +159,12 @@ int run_inference( String8 model_path_arg,
                   b32 stats_output_enabled,
                   s32 preferred_batch_size,
                   int audio_source,
-                  float start_seconds );
+                  float start_seconds,
+                  const char *audio_output_file,
+                  const char *log_output_file,
+                  const char *speech_audio_file,
+                  const char *noise_audio_file,
+                  b32 verbose_logging );
 
 void process_chunks( MemoryArena *arena, VADC_Context context, Silero_Config config,
                     const size_t buffered_samples_count,

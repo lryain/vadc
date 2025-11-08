@@ -44,7 +44,8 @@ typedef int32_t b32;
 // TODO(irwin): define that disables asserts
 
 #ifndef ASSERT_HALT
-#define ASSERT_HALT do { __debugbreak(); } while(0)
+#include <signal.h>
+#define ASSERT_HALT do { raise(SIGTRAP); } while(0)
 #endif
 
 #ifndef ASSERT_UNUSED

@@ -1,9 +1,8 @@
 #pragma once
 #include "utils.h"
-
 #include "memory.h"
-
-#include <stdarg.h> //va_list, va_start, va_end
+#include <stdarg.h>
+#include <wchar.h>
 
 typedef s64 strSize;
 
@@ -38,3 +37,7 @@ String8 escape_json_string(MemoryArena *arena, String8 input);
 b32 String8_Equal(String8 a, String8 b);
 
 String8 *get_command_line_as_utf8(MemoryArena *arena, int *out_argcount );
+
+/* Set command line arguments from main (call this from main() on Linux) */
+void set_command_line_args(int argc, char **argv);
+

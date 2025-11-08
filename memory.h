@@ -71,12 +71,8 @@ MemoryArena *DEBUG_getDebugArena();
 
 
 #ifdef MEMORY_IMPLEMENTATION
-#include <string.h> // memset, strlen, memmove
-#define NOMINMAX
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-
-//#pragma comment(lib, "clang_rt.asan-x86_64.lib")
+#include <string.h>
+#include <stdlib.h>
 
 #include <sanitizer/asan_interface.h>
 
@@ -114,13 +110,9 @@ MemoryArena *DEBUG_getDebugArena()
    {
       // NOTE(irwin): not initialized
       //__asan_get_shadow_mapping( &shadow_memory_scale, &shadow_memory_offset );
-#if 1
       u64 size = Megabytes( 512 );
-      void *address = VirtualAlloc( 0, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE );
+      void *address = malloc( size );
       initializeMemoryArena( &DEBUG_debug_arena_2, address, size );
-#else
-      initializeMemoryArena( &DEBUG_debug_arena_2, &debug_arena_buffer_2[0], sizeof( debug_arena_buffer_2 ) );
-#endif
 
       return &DEBUG_debug_arena_2;
    }

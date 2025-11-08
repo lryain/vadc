@@ -2,9 +2,20 @@
 #define MATHS_INCLUDE_H
 
 #include "utils.h"
-#include <math.h> //expf
+#include <math.h>
 
+/* x86 SIMD intrinsics - only on x86 architectures */
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
 #include <immintrin.h>
+#else
+/* Provide stubs for ARM and other non-x86 platforms */
+typedef struct { float v[8]; } __m256;
+static inline __m256 _mm256_setzero_ps(void) { __m256 r = {{0}}; return r; }
+static inline __m256 _mm256_loadu_ps(const float *p) { (void)p; __m256 r = {{0}}; return r; }
+static inline __m256 _mm256_mul_ps(__m256 a, __m256 b) { (void)a; (void)b; __m256 r = {{0}}; return r; }
+static inline __m256 _mm256_add_ps(__m256 a, __m256 b) { (void)a; (void)b; __m256 r = {{0}}; return r; }
+static inline __m256 _mm256_hadd_ps(__m256 a, __m256 b) { (void)a; (void)b; __m256 r = {{0}}; return r; }
+#endif
 
 static inline float sigmoid_one( float value )
 {

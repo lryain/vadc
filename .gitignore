@@ -1,6 +1,7 @@
 .vs/
 __pycache__/
 venv/
+build/
 libonnx/
 tinygrad/
 silero-vad-models/

@@ -1,12 +1,21 @@
 #include "string8.h"
 
-#include <stdio.h> //vsnprintf
-#include <string.h> //strlen
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <wchar.h>
+#include <locale.h>
 
-#define NOMINMAX
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h> //WideCharToMultiByte, MultiByteToWideChar
-#include <Shellapi.h> // CommandLineToArgvW, GetCommandLineW
+/* Global storage for command line arguments (Linux) */
+static int g_argc = 0;
+static char **g_argv = NULL;
+
+/* Set command line arguments from main (call this from main() on Linux) */
+void set_command_line_args(int argc, char **argv)
+{
+    g_argc = argc;
+    g_argv = argv;
+}
 
 String8 String8FromPointerSize(const s8 *pointer, strSize size)
 {
@@ -77,75 +86,19 @@ String8 String8_pushf(MemoryArena *arena, const char *format, ...)
 
 int String8_ToWidechar(MemoryArena *arena, wchar_t **dest, String8 source)
 {
-    int buf_char_count_needed = MultiByteToWideChar(
-        CP_UTF8,
-        0,
-        (const char *)source.begin,
-        (int)source.size,
-        0,
-        0
-    );
-
-    if (buf_char_count_needed)
-    {
-        *dest = pushArray(arena, buf_char_count_needed + 1, wchar_t);
-        MultiByteToWideChar(
-            CP_UTF8,
-            0,
-            (const char *)source.begin,
-            (int)source.size,
-            *dest,
-            buf_char_count_needed
-        );
-
-        (*dest)[buf_char_count_needed] = 0;
-    }
-
-    return buf_char_count_needed;
+    /* Not available on Linux - kept for compatibility */
+    (void)arena; (void)dest; (void)source;
+    return 0;
 }
 
 String8 Widechar_ToString8(MemoryArena *arena, const wchar_t *str, size_t str_length)
 {
+    /* Not available on Linux - kept for compatibility */
+    (void)arena; (void)str; (void)str_length;
     String8 result = {0};
-
-    if (str_length == 0)
-    {
-        str_length = wcslen(str);
-    }
-
-    int buf_char_count_needed = WideCharToMultiByte(
-        CP_UTF8,
-        0,
-        str,
-        (int)str_length,
-        0,
-        0,
-        0,
-        0
-    );
-
-    if (buf_char_count_needed)
-    {
-        char *dest = pushArray(arena, buf_char_count_needed + 1, char);
-        WideCharToMultiByte(
-            CP_UTF8,
-            0,
-            str,
-            (int)str_length,
-            dest,
-            buf_char_count_needed,
-            0,
-            0
-        );
-
-        dest[buf_char_count_needed] = 0;
-
-        result = String8FromPointerSize((const s8 *)dest, buf_char_count_needed);
-    }
-
     return result;
-
 }
+
 
 String8 escape_json_string(MemoryArena *arena, String8 input)
 {
@@ -190,21 +143,30 @@ b32 String8_Equal(String8 a, String8 b)
     }
 }
 
-String8 *get_command_line_as_utf8(MemoryArena *arena, int *out_argcount )
+String8 *get_command_line_as_utf8(MemoryArena *arena, int *out_argcount)
 {
-   int argcount = 0;
-   wchar_t **arglist = CommandLineToArgvW( GetCommandLineW(), &argcount );
-
-   int u8argc = argcount;
-   // char **u8argv = (char **)malloc( sizeof( char * ) * argcount );
-   String8 *result = pushArray(arena, argcount, String8);
-   for ( int arg_index = 0; arg_index < argcount; ++arg_index )
-   {
-      result[arg_index] = Widechar_ToString8(arena, arglist[arg_index], 0);
-      // Widechar_ToUTF8( &u8argv[arg_index], arglist[arg_index] );
-   }
-
-   *out_argcount = u8argc;
-
-   return result;
+    /* Linux version: use globally stored argc/argv */
+    if (g_argc == 0 || g_argv == NULL) 
+    {
+        *out_argcount = 0;
+        return NULL;
+    }
+    
+    /* Allocate array of String8 for all arguments */
+    String8 *result = pushArray(arena, g_argc, String8);
+    if (!result)
+    {
+        *out_argcount = 0;
+        return NULL;
+    }
+    
+    /* Convert each char* argument to String8 */
+    for (int i = 0; i < g_argc; ++i)
+    {
+        result[i] = String8FromCString(g_argv[i]);
+    }
+    
+    *out_argcount = g_argc;
+    return result;
 }
+
