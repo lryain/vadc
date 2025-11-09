@@ -58,11 +58,8 @@ void create_tensor_int64( OrtMemoryInfo *memory_info,
 
 int enable_cuda( OrtSessionOptions *session_options );
 
-static void *ort_init( MemoryArena * arena, String8 model_path_arg, Silero_Config *config);
-static inline void *backend_init( MemoryArena * arena, String8 model_path_arg, Silero_Config *config)
-{
-   return ort_init(arena, model_path_arg, config);
-}
+void *ort_init( MemoryArena * arena, String8 model_path_arg, Silero_Config *config);
+void *backend_init( MemoryArena * arena, String8 model_path_arg, Silero_Config *config);
 
 s32 ort_get_batch_size_restriction( OrtSession * session, OrtAllocator * ort_allocator );
 s32 ort_sequence_count_restriction( OrtSession *session, OrtAllocator *ort_allocator );
@@ -71,14 +68,5 @@ s32 ort_sr_input_index( OrtSession *session, OrtAllocator *ort_allocator );
 s32 ort_lstm_hidden_size( OrtSession *session, OrtAllocator *ort_allocator, s32 *lstm_batch_size );
 void ort_create_tensors(Silero_Config config, ONNX_Specific *onnx, Tensor_Buffers buffers);
 void ort_run(ONNX_Specific *onnx);
-
-static inline void backend_run(MemoryArena *arena, VADC_Context *context, Silero_Config config)
-{
-   VAR_UNUSED(arena);
-   ort_run(context->backend);
-}
-
-static inline void backend_create_tensors(Silero_Config config, void *backend, Tensor_Buffers buffers)
-{
-   ort_create_tensors(config, backend, buffers);
-}
+void backend_run(MemoryArena *arena, VADC_Context *context, Silero_Config config);
+void backend_create_tensors(Silero_Config config, void *backend, Tensor_Buffers buffers);

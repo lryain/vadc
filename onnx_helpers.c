@@ -1,3 +1,4 @@
+#include "vadc.h"
 #include "onnx_helpers.h"
 
 #ifdef _MSC_VER
@@ -81,7 +82,7 @@ int enable_cuda(OrtSessionOptions* session_options)
 
 static const wchar_t model_filename[] = SILERO_FILENAME;
 
-static void *ort_init( MemoryArena *arena, String8 model_path_arg, Silero_Config *config)
+void *ort_init( MemoryArena *arena, String8 model_path_arg, Silero_Config *config)
 {
    g_ort = OrtGetApiBase()->GetApi( ORT_API_VERSION );
    if ( !g_ort )
@@ -233,6 +234,11 @@ static void *ort_init( MemoryArena *arena, String8 model_path_arg, Silero_Config
    }
 
    return onnx;
+}
+
+void *backend_init( MemoryArena *arena, String8 model_path_arg, Silero_Config *config)
+{
+   return ort_init( arena, model_path_arg, config );
 }
 
 s32 ort_get_batch_size_restriction( OrtSession *session, OrtAllocator *ort_allocator )
@@ -592,4 +598,16 @@ void ort_run(ONNX_Specific *onnx)
    int is_tensor;
    ORT_ABORT_ON_ERROR( g_ort->IsTensor( onnx->output_tensors[0], &is_tensor ) );
    Assert( is_tensor );
+}
+
+void backend_run(MemoryArena *arena, VADC_Context *context, Silero_Config config)
+{
+   VAR_UNUSED(arena);
+   VAR_UNUSED(config);
+   ort_run((ONNX_Specific *)context->backend);
+}
+
+void backend_create_tensors(Silero_Config config, void *backend, Tensor_Buffers buffers)
+{
+   ort_create_tensors(config, (ONNX_Specific *)backend, buffers);
 }

@@ -97,7 +97,7 @@ struct VADC_Context
 #define SILERO_SAMPLE_RATE 16000
 
 // const size_t HARDCODED_WINDOW_SIZE_SAMPLES = SILERO_WINDOW_SIZE_SAMPLES;
-const size_t HARDCODED_SAMPLE_RATE = SILERO_SAMPLE_RATE;
+static const size_t HARDCODED_SAMPLE_RATE = SILERO_SAMPLE_RATE;
 
 #undef SILERO_WINDOW_SIZE_SAMPLES
 #undef SILERO_SAMPLE_RATE
@@ -135,14 +135,13 @@ struct VADC_Stats
    b32 output_enabled;
 };
 
-typedef enum Segment_Output_Format Segment_Output_Format;
-enum Segment_Output_Format
+typedef enum Segment_Output_Format
 {
    Segment_Output_Format_Seconds = 0,
    Segment_Output_Format_CentiSeconds, // NOTE(irwin): hundredths of seconds, 500 -> 5 seconds
 
    Segment_Output_Format_COUNT
-};
+} Segment_Output_Format;
 
 
 int run_inference( String8 model_path_arg,
