@@ -157,9 +157,16 @@ void *ort_init( MemoryArena *arena, String8 model_path_arg, Silero_Config *confi
    
    fprintf(stderr, "Loading ONNX model: %s\n", model_path_buf);
 
+   // 通过 arena 创建 onnx 会话。注意：CreateSession 在 ONNX 运行时错误时会返回错误码。
+   // 这里捕获失败并安静返回 NULL，而不是使用 ORT_ABORT_ON_ERROR 导致进程异常退出。
    ONNX_Specific *onnx = pushStruct(arena, ONNX_Specific);
-
-   ORT_ABORT_ON_ERROR( g_ort->CreateSession( env, (const wchar_t *)model_path_buf, session_options, &onnx->session ) );
+   OrtStatus* onnx_status = g_ort->CreateSession(env, (const wchar_t *)model_path_buf, session_options, &onnx->session);
+   if (onnx_status != NULL) {
+      const char* msg = g_ort->GetErrorMessage(onnx_status);
+      fprintf(stderr, "ONNX CreateSession failed: %s\n", msg);
+      g_ort->ReleaseStatus(onnx_status);
+      return 0; // 不再 abort，返回 NULL 以便上层处理 (例如回退到 energy VAD)
+   }
 
    if (onnx->session)
    {
@@ -478,13 +485,12 @@ void ort_create_tensors(Silero_Config config, ONNX_Specific *onnx, Tensor_Buffer
    OrtValue **input_tensors = onnx->input_tensors;
 
    // NOTE(irwin): samples input
-
    create_tensor(onnx->memory_info,
-                 &input_tensors[0],
-                 input_tensor_samples_shape,
-                 input_tensor_samples_shape_count,
-                 buffers.input_samples,
-                 final_input_count * config.batch_size);
+       &input_tensors[0],
+       input_tensor_samples_shape,
+       input_tensor_samples_shape_count,
+       buffers.input_samples,
+       final_input_count * config.batch_size);
 
 
    int64_t state_shape[3] = {0};
@@ -531,11 +537,11 @@ void ort_create_tensors(Silero_Config config, ONNX_Specific *onnx, Tensor_Buffer
 
    // NOTE(irwin): output tensor
    create_tensor(onnx->memory_info,
-                 output_prob_tensor,
-                 config.prob_shape,
-                 config.prob_shape_count,
-                 buffers.output,
-                 config.prob_tensor_element_count);
+       output_prob_tensor,
+       config.prob_shape,
+       config.prob_shape_count,
+       buffers.output,
+       config.prob_tensor_element_count);
 
    // NOTE(irwin): lstm h output tensor
    OrtValue** state_h_out_tensor = &output_tensors[1];

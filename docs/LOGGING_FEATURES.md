@@ -9,8 +9,8 @@
 启用详细的日志输出，显示所有检测到的语音事件和系统信息。
 
 ```bash
-cd /path/to/vadc
-arecord -f S16_LE -c 1 -r 16000 -q - | ./build/vadc --stdin --verbose
+cd /path/to/test_vadc
+arecord -f S16_LE -c 1 -r 16000 -q - | ./build/test_vadc --stdin --verbose
 ```
 
 **输出示例:**
@@ -38,7 +38,7 @@ VADC - 语音活动检测系统
 将获取的原始音频 (16-bit PCM, 16kHz) 保存到文件，供后续播放或分析。
 
 ```bash
-arecord -f S16_LE -c 1 -r 16000 -q - | ./build/vadc --stdin --save_audio my_audio.raw
+arecord -f S16_LE -c 1 -r 16000 -q - | ./build/test_vadc --stdin --save_audio my_audio.raw
 ```
 
 **播放保存的音频:**
@@ -56,7 +56,7 @@ aplay audio.wav
 将检测日志保存到文件，便于事后分析和调试。
 
 ```bash
-arecord -f S16_LE -c 1 -r 16000 -q - | ./build/vadc --stdin --save_log detection.log
+arecord -f S16_LE -c 1 -r 16000 -q - | ./build/test_vadc --stdin --save_log detection.log
 ```
 
 ### 4. 组合使用
@@ -65,7 +65,7 @@ arecord -f S16_LE -c 1 -r 16000 -q - | ./build/vadc --stdin --save_log detection
 
 ```bash
 arecord -f S16_LE -c 1 -r 16000 -q - | \
-  ./build/vadc --stdin \
+  ./build/test_vadc --stdin \
     --verbose \
     --save_audio speech.raw \
     --save_log speech.log \
@@ -126,7 +126,7 @@ timeout 5 ./run_vadc_with_logging.sh record my_voice.wav
 新功能已集成，直接编译即可：
 
 ```bash
-cd /path/to/vadc
+cd /path/to/test_vadc
 mkdir -p build
 cd build
 cmake -DCMAKE_BUILD_TYPE=Release ..
@@ -170,7 +170,7 @@ sox -t raw -r 16000 -b 16 -c 1 -e signed-integer audio.raw audio.flac
 - 10 分钟的音频 ≈ 19.2 MB
 
 **Q: 可以处理后的实时播放吗?**
-- 可以用管道：`./build/vadc --stdin | aplay`
+- 可以用管道：`./build/test_vadc --stdin | aplay`
 - 但需要保证处理速度快于实时
 
 ## 性能说明
