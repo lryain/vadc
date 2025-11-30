@@ -10,7 +10,7 @@
 
 ```bash
 cd /path/to/test_vadc
-arecord -f S16_LE -c 1 -r 16000 -q - | ./build/test_vadc --stdin --verbose
+arecord -f S16_LE -c 1 -r 16000 -q - | ./test_vadc --stdin --verbose
 ```
 
 **输出示例:**
