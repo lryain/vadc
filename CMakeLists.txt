@@ -20,7 +20,7 @@ set(SOURCES
 )
 
 # ONNX Runtime 查找：优先使用 Lowwi 提供的版本（如果存在），以便多个模块共用同一版本；其后尝试本地捆绑的版本，再 fallback 到系统安装
-set(LOWWI_ONNX_CANDIDATE "${CMAKE_SOURCE_DIR}/../lowwi/lib/aarch64/lib/libonnxruntime.so.1.18.1")
+set(LOWWI_ONNX_CANDIDATE "${CMAKE_SOURCE_DIR}/../lib/libonnxruntime.so.1.16.3")
 if (EXISTS "${LOWWI_ONNX_CANDIDATE}")
     message(STATUS "✓ Using Lowwi-provided ONNX Runtime: ${LOWWI_ONNX_CANDIDATE}")
     set(ONNX_LIB "${LOWWI_ONNX_CANDIDATE}")
